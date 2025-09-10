@@ -1,2 +1,2 @@
-.env
-gcp-enabled-priv-key-firebase.json
+config/.env
+config/gcp-enabled-priv-key-firebase.json

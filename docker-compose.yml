@@ -1,0 +1,31 @@
+services:
+  mosquitto_remote:
+    image: eclipse-mosquitto
+    ports:
+      - "9002:9001"
+      - "1884:1883"
+    networks:
+      - default
+      - shared_test_network_mqtt
+    volumes:
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/log:/mosquitto/log
+  heartbeat:
+    build:
+      context: .
+      dockerfile: ./src/Dockerfile
+    container_name: heartbeat_container
+    networks:
+      - default
+    depends_on:
+      - mosquitto_remote
+    environment:
+      ENV_FILE: /app/config/.env
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config
+    command: ["sleep", "infinity"]
+networks:
+  shared_test_network_mqtt:
+    external: true
