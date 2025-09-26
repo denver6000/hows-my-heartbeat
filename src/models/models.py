@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, List
+from typing import Dict, Optional, List
 
 
 class HubStatus:
@@ -59,6 +59,13 @@ class TimeSlot:
     timeslot_id: str
     start_time: str
     end_time: str
+    
+    start_hour: int
+    start_minute: int
+    
+    end_hour: int
+    end_minute: int
+    
     subject: Optional[str] = None
     teacher: Optional[str] = None
     teacher_email: Optional[str] = None
@@ -87,16 +94,19 @@ class ResolvedScheduleSlot:
     room_id: str
     day_name: str
     day_order: int
-    start_time: str
-    end_time: str
+    start_hour: int
+    start_minute: int
+    end_hour: int
+    end_minute: int
+    start_time_seconds: int
+    start_time: str | None
+    end_time: str | None
     subject: str
     teacher: str
     teacher_email: str
-    time_start_in_seconds: int
     start_date_in_seconds_epoch: float | None
     end_date_in_seconds_epoch: float | None
     is_temporary: bool = False
-
 
 @dataclass 
 class ScheduleDocument:
@@ -113,3 +123,30 @@ class ProcessedSchedulePayload:
     upload_date_epoch: float
     is_temporary: bool
     resolved_slots: List[ResolvedScheduleSlot] = field(default_factory=list)
+
+
+@dataclass
+class SettingsRequest:
+    """Settings request model from settings_request collection"""
+    request_id: str
+    minute_mark_to_warn: int
+    minute_mark_to_skip: int
+    bypass_admin_approval: bool
+    date_requested: Optional[datetime] = None
+    is_received_by_system_hub: bool = False
+
+
+@dataclass
+class RoomStatus:
+    """Room status model for room_status collection"""
+    room_id: str
+    is_turned_on: bool
+    last_updated: datetime
+
+
+@dataclass
+class TimeslotStatus:
+    """Timeslot status model for timeslots_status collection"""
+    timeslot_id: str
+    status: int  # 0 or 1
+    last_updated: datetime

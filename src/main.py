@@ -9,19 +9,26 @@ from zoneinfo import ZoneInfo
 import paho.mqtt.client as mqtt
 from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
-from src.firestore.device_firestore import extract_resolved_slots_by_day_v2, process_changes_from_firestore, process_schedule_raw_from_firestore, process_schedule_raw_with_tracking, set_device_status, set_hub_status
+from google.cloud.firestore_v1 import FieldFilter
+from src.firestore.device_firestore import  init_firestore, process_schedule_raw_with_tracking, set_device_status, set_hub_status, set_schedule_document_as_received, set_schedule_temp_document_as_received, set_settings_firebase_doc, get_settings_request, set_settings_request_as_received, get_room_status, set_room_status, get_timeslot_status, set_timeslot_status
 from src.models.models import DeviceStatusInfo, RoomStatusAndTimestamp, DeviceIdAndPulseTimeStamp
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 DEVICE_TZ = ZoneInfo("Asia/Manila")
 NODE_HEART_PULSE_BASE = "heart_pulse"
-NODE_ROOM_STATUS_BASE = "room_status"
-HUB_HEARTBEAT = "hub_heartbeat"
+ROOM_STATUS_BASE = "room_status"
+HUB_CONNECTION_STATE = "broker/connection/+/state"
+TIMESLOTS_BASE = "timeslots"
+SCHEDULE_UPDATE_ACK = "schedule_update_ack"
+SCHEDULE_TEMP_UPDATE = "schedule_temp_update"
+SCHEDULE_TEMP_ACK = "schedule_temp_update_ack"
+SCHEDULE_UPDATE = "schedule_update"
+SCHEDULE_PROCESS = "schedule_update_process"
+SETTINGS_UPDATE_ACK = "settings_update_ack"
 
 # Thread locks for thread-safe access
 pulse_lock = threading.Lock()
 room_status_lock = threading.Lock()
-hub_pulse_lock = threading.Lock()
 hub_status_lock = threading.Lock()
 resolved_status_lock = threading.Lock()
 
@@ -30,48 +37,24 @@ map_of_room_status: Dict[str, RoomStatusAndTimestamp] = {}
 map_of_resolved_status: Dict[str, DeviceStatusInfo] = {
     "RM301/SOCKET-1": DeviceStatusInfo(device_id="SOCKET-1", room="RM301")
 }
-map_of_hub_pulse: Dict[str, datetime] = {}
-map_of_hub_status: Dict[str, bool] = {
-}
+hub_is_online: bool = False
 
-
-def on_connect(client, userdata, flags, reason_code, properties):
-    print(f"Connected with result code {reason_code}")
+def on_connect(client, userdata, flags, rc):
+    print(f"Connected with result code {rc}")
     topics = (
         f"{NODE_HEART_PULSE_BASE}/#",
-        f"{NODE_ROOM_STATUS_BASE}/#",
-        f"{HUB_HEARTBEAT}"
+        f"{ROOM_STATUS_BASE}/#",
+        f"{HUB_CONNECTION_STATE}",
+        f"{TIMESLOTS_BASE}/#",
+        f"{SCHEDULE_UPDATE_ACK}/#",
+        f"{SCHEDULE_TEMP_ACK}/#",
+        f"{SETTINGS_UPDATE_ACK}/#"
     )
     for topic in topics:
-        client.subscribe(topic)
+        result = client.subscribe(topic)
+        print(f"Subscribed to topic: {topic}, result: {result}")
 
 
-def on_message(client, userdata, msg):
-    topic = msg.topic
-    now = datetime.now(tz=DEVICE_TZ)
-    if NODE_HEART_PULSE_BASE in topic:
-        try:
-            topic_base, room_id, device_id = topic.split("/")
-            with pulse_lock:
-                map_of_pulse[room_id + "/" + device_id] = DeviceIdAndPulseTimeStamp(
-                    device_id=device_id,
-                    room_id=room_id,
-                    timestamp=now)
-        except ValueError:
-            print("Malformed topic.")
-    elif NODE_ROOM_STATUS_BASE in topic:
-        try:
-            topic_base, room_id, device_id = topic.split("/")
-            with room_status_lock:
-                map_of_room_status[room_id + "/" + device_id] = RoomStatusAndTimestamp(
-                    device_id=device_id,
-                    time_received=now,
-                    is_turned_on=msg.payload.decode() == "1")
-        except ValueError:
-            print("Malformed topic.")
-    elif HUB_HEARTBEAT in topic:
-        with hub_pulse_lock:
-            map_of_hub_pulse[HUB_HEARTBEAT] = now
 
 
 def eval_pulse(firestore_db):
@@ -102,34 +85,8 @@ def eval_pulse(firestore_db):
             status_info.is_board_active = status
             map_of_changed_id[key] = status_info
 
-    for key in room_status_copy:
-        status_info = dupe_dict.get(key)
-        if status_info is None:
-            key_split = key.split("/")
-            dupe_dict[key] = DeviceStatusInfo(device_id=key_split[1], room=key_split[0])
-            status_info = dupe_dict[key]
-
-        room_status_and_timestamp = room_status_copy[key]
-        diff = now - room_status_and_timestamp.time_received
-
-        # Check if timestamp is within the 5-second threshold
-        if diff.total_seconds() <= 5:
-            new_room_status = room_status_and_timestamp.is_turned_on
-        else:
-            new_room_status = False
-
-        # Check if the new_room_status is different from the current one
-        if new_room_status != status_info.room_status:
-            changed_status = map_of_changed_id.get(key)
-
-            # Check if the obj was previously modified from previous check for device status
-            if changed_status is None:
-                # If it does not yet exist, add
-                status_info.room_status = new_room_status
-                map_of_changed_id[key] = status_info
-            else:
-                # If it does exist, update
-                changed_status.room_status = new_room_status
+    # Room status is now handled directly via MQTT in real-time
+    # No need to track room status with timestamps here
 
     # Update firestore and resolved status
     with resolved_status_lock:
@@ -138,133 +95,174 @@ def eval_pulse(firestore_db):
             set_device_status(firestore_db=firestore_db, device_status_info=map_of_changed_id[id_of_changed])
 
 
-def eval_hub_status(firestore_db):
-    # Get current pulse timestamp with lock
-    with hub_pulse_lock:
-        last_hub_pulse = map_of_hub_pulse.get(HUB_HEARTBEAT)
-    # Evaluate what the status should be
-    evaluated_status: bool
-    if last_hub_pulse is None:
-        evaluated_status = False
-    else:
-        now = datetime.now(tz=DEVICE_TZ)
-        diff = (now - last_hub_pulse).total_seconds()
-        if diff > 10:
-            evaluated_status = False
-        else:
-            evaluated_status = True
-    # Check current status and update if needed with lock
+def update_hub_status(firestore_db, is_online: bool):
+    """Update hub status only if it has changed"""
+    global hub_is_online
     with hub_status_lock:
-        current_val = map_of_hub_status.get(HUB_HEARTBEAT)
-        if current_val is None:
-            map_of_hub_status[HUB_HEARTBEAT] = evaluated_status
-            set_hub_status(firestore_db=firestore_db, is_online=evaluated_status)
-        elif current_val != evaluated_status:
-            map_of_hub_status[HUB_HEARTBEAT] = evaluated_status
-            set_hub_status(firestore_db=firestore_db, is_online=evaluated_status)
+        if hub_is_online != is_online:
+            hub_is_online = is_online
+            set_hub_status(firestore_db=firestore_db, is_online=is_online)
+            print(f"Hub status changed to: {'ONLINE' if is_online else 'OFFLINE'}")
 
 
 if __name__ == '__main__':
     acc_path = os.getenv("ENV_FILE")
     load_dotenv(acc_path)
-    mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, transport="websockets")
+    mqttc = mqtt.Client(transport="websockets")
     mqttc.on_connect = on_connect
+    
+    service_acc_path = os.getenv("SERVICE_ACCOUNT_PATH")
+    if not service_acc_path:
+        raise ValueError("SERVICE_ACCOUNT_PATH environment variable is required")
+
+    firestore = init_firestore(cred_path=service_acc_path)
+    
+    def on_message(client, userdata, msg):
+        topic = msg.topic
+        payload = msg.payload.decode()
+        now = datetime.now(tz=DEVICE_TZ)
+        
+        # Debug: Log all incoming messages
+        print(f"[DEBUG] Received message - Topic: {topic}, Payload: {payload}")
+        
+        if NODE_HEART_PULSE_BASE in topic:
+            try:
+                topic_base, room_id, device_id = topic.split("/")
+                with pulse_lock:
+                    map_of_pulse[room_id + "/" + device_id] = DeviceIdAndPulseTimeStamp(
+                        device_id=device_id,
+                        room_id=room_id,
+                        timestamp=now)
+            except ValueError:
+                print("Malformed topic.")
+        elif ROOM_STATUS_BASE in topic:
+            try:
+                topic_base, room_id = topic.split("/")
+                is_turned_on = msg.payload.decode() == "1"
+                # Update room status in Firestore (only if changed)
+                set_room_status(firestore_db=firestore, room_id=room_id, is_turned_on=is_turned_on)
+            except ValueError:
+                print("Malformed room status topic.")
+        elif "broker/connection/" in topic and topic.endswith("/state"):
+            try:
+                # Extract remote_id from broker/connection/remote_id/state
+                parts = topic.split("/")
+                if len(parts) == 4 and parts[0] == "broker" and parts[1] == "connection" and parts[3] == "state":
+                    remote_id = parts[2]
+                    connection_state = msg.payload.decode()
+                    is_online = connection_state == "1" or connection_state.lower() == "online"
+                    update_hub_status(firestore_db=firestore, is_online=is_online)
+                    print(f"Hub {remote_id} connection state: {connection_state}")
+            except Exception as e:
+                print(f"Error processing hub connection state: {e}")
+        elif TIMESLOTS_BASE in topic:
+            print(f"[DEBUG] Processing timeslots topic: {topic}")
+            try:
+                # Extract timeslot_id from timeslots/timeslot_id/status
+                parts = topic.split("/")
+                print(f"[DEBUG] Topic parts: {parts}")
+                
+                if len(parts) >= 3 and parts[0] == "timeslots":
+                    if parts[2] == "status":
+                        timeslot_id = parts[1]
+                        status = int(payload)
+                        print(f"[DEBUG] Parsed - Timeslot ID: {timeslot_id}, Status: {status}")
+                        # Update timeslot status in Firestore (only if changed)
+                        set_timeslot_status(firestore_db=firestore, timeslot_id=timeslot_id, status=status)
+                        print(f"✅ Timeslot {timeslot_id} status: {status}")
+                    else:
+                        print(f"[DEBUG] Ignoring timeslot topic (not /status): {topic}")
+                else:
+                    print(f"[DEBUG] Invalid timeslot topic format: {topic}")
+            except (ValueError, IndexError) as e:
+                print(f"❌ Malformed timeslot topic or invalid payload: {e}")
+                print(f"    Topic: {topic}, Payload: {payload}")
+            except Exception as e:
+                print(f"❌ Error processing timeslot status: {e}")
+                print(f"    Topic: {topic}, Payload: {payload}")
+        elif SCHEDULE_UPDATE_ACK in topic:
+            try:
+                topic_base, schedule_id = topic.split("/")
+                print(f"Received schedule update ACK for schedule ID: {schedule_id} with payload: {json.loads(msg.payload.decode())}")
+                set_schedule_document_as_received(
+                    firestore_db=firestore,
+                    is_received=True,
+                    schedule_id=schedule_id
+                )
+            except ValueError:
+                print("Malformed topic for schedule update ACK.")
+        elif SCHEDULE_TEMP_ACK in topic:
+            try:
+                topic_base, temp_schedule_id = topic.split("/")
+                print(f"Received temporary schedule ACK for ID: {temp_schedule_id}")
+                set_schedule_temp_document_as_received(
+                    firestore_db=firestore,
+                    is_received=True,
+                    temporary_schedule_id=temp_schedule_id
+                )
+            except ValueError:
+                print("Malformed topic for temporary schedule ACK.")
+        elif SETTINGS_UPDATE_ACK in topic:
+            try: 
+                topic_base, request_id = topic.split("/")
+                print(f"Received settings update ACK for ID: {request_id}")
+                
+                # Get the settings request from Firestore
+                settings_request = get_settings_request(firestore_db=firestore, request_id=request_id)
+                
+                if settings_request:
+                    # Apply the settings from the request to the system settings
+                    set_settings_firebase_doc(
+                        firestore_db=firestore,
+                        minute_mark_to_warn=settings_request.minute_mark_to_warn,
+                        minute_mark_to_skip=settings_request.minute_mark_to_skip,
+                        bypass_admin_approval=settings_request.bypass_admin_approval,
+                        request_id=request_id
+                    )
+                    
+                    # Mark the settings request as received by system hub
+                    set_settings_request_as_received(
+                        firestore_db=firestore,
+                        request_id=request_id,
+                        is_received=True
+                    )
+                    
+                    print(f"Applied settings from request {request_id} to system settings and marked as received")
+                else:
+                    print(f"Settings request {request_id} not found in Firestore")
+                    
+            except ValueError:
+                print("Malformed topic for settings update ACK.")
+            except Exception as e:
+                print(f"Error processing settings update ACK: {e}")
+                print("Malformed topic for temporary schedule ACK.")
+        
     mqttc.on_message = on_message
     url = os.getenv("MQTT_URL")
-    port = os.getenv("MQTT_PORT")
+    port_str = os.getenv("MQTT_PORT")
     password = os.getenv("MQTT_PASSWORD")
     username = os.getenv("MQTT_USERNAME")
+    
+    if not all([url, port_str, username, password]):
+        raise ValueError("MQTT configuration environment variables are required")
+    
+    # Type assertions after validation
+    assert url is not None
+    assert port_str is not None
+    assert username is not None
+    assert password is not None
+    
     mqttc.username_pw_set(username=username, password=password)
-    mqttc.connect(host=url, port=int(port), keepalive=60)
+    mqttc.connect(host=url, port=int(port_str), keepalive=60)
     mqttc.loop_start()
 
 
     async def main():
-        service_acc_path = os.getenv("SERVICE_ACCOUNT_PATH")
 
         my_scheduler = AsyncIOScheduler()
         my_scheduler.start()
 
-        from src.firestore.device_firestore import init_firestore
-
-        firestore = init_firestore(cred_path=service_acc_path)
-
         my_scheduler.add_job(eval_pulse, trigger=IntervalTrigger(seconds=2), args=[firestore])
-        my_scheduler.add_job(eval_hub_status, trigger=IntervalTrigger(seconds=2), args=[firestore])
-        
-        def on_temp_schedule_updated(col_snapshot, changes, read_time):
-            # Handle different types of changes to temporary_schedules collection
-            added_changes = []
-            modified_changes = []
-            
-            for change in changes:
-                if change.type.name == 'ADDED':
-                    added_changes.append(change)
-                elif change.type.name == 'MODIFIED':
-                    modified_changes.append(change)
-                elif change.type.name == 'REMOVED':
-                    print(f"Temporary schedule REMOVED: {change.document.id}")
-            
-            # Process added/modified changes
-            all_changes = added_changes + modified_changes
-            if all_changes:
-                normalized_schedule = process_changes_from_firestore(all_changes)
-                normalized_timeslots = extract_resolved_slots_by_day_v2(normalized_schedule)
-                timeslots_in_dict = [asdict(slot) for slot in normalized_timeslots]
-                
-                mqttc.publish("schedule_temp_update", qos=2, payload=json.dumps(timeslots_in_dict), retain=False)
-                print(f"Published temporary schedule update: {len(all_changes)} changes")
-        
-        def on_schedule_raw_updated(col_snapshot, changes, read_time):
-            # Handle different types of changes to schedule_raw collection
-            added_docs = []
-            modified_docs = []
-            removed_docs = []
-            
-            for change in changes:
-                if change.type.name == 'ADDED':
-                    added_docs.append(change.document)
-                elif change.type.name == 'MODIFIED':
-                    modified_docs.append(change.document)
-                elif change.type.name == 'REMOVED':
-                    removed_docs.append(change.document)
-            
-            # Process added documents
-            if added_docs:
-                payloads = process_schedule_raw_with_tracking(added_docs)
-                payloads_in_dict = [asdict(payload) for payload in payloads]
-                print(f"Published NEW schedule: {payloads_in_dict}")
-                for payload in payloads:
-                    payload_dict = asdict(payload)
-                    mqttc.publish(
-                        f"schedule_update/{payload.schedule_id}", 
-                        qos=2, 
-                        payload=json.dumps(payload_dict), 
-                        retain=False
-                    )
-            if removed_docs:
-                for doc in removed_docs:
-                    doc_data = doc.to_dict()
-                    if doc_data:
-                        schedule_id = doc_data.get("schedule_id", doc.id)
-                        # Publish removal notification
-                        removal_payload = {
-                            "schedule_id": schedule_id,
-                            "action": "REMOVED",
-                            "timestamp_epoch": datetime.now().timestamp()
-                        }
-                        mqttc.publish("schedule_removed", qos=2, payload=json.dumps(removal_payload), retain=False)
-                        print(f"Published REMOVED schedule: {schedule_id}")
-                
-            
-        # firestore.collection("temporary_schedules").on_snapshot(
-        #     callback=on_temp_schedule_updated
-        # )
-        
-        firestore.collection("schedule_raw").on_snapshot(
-            callback=on_schedule_raw_updated
-        )
-        
         
         while True:
             await asyncio.sleep(1000)
