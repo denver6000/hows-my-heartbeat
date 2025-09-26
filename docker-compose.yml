@@ -25,7 +25,7 @@ services:
     volumes:
       - ./src:/app/src
       - ./config:/app/config
-    command: ["sleep", "infinity"]
+    command: ["python3", "-m", "src.main"]
 networks:
   shared_test_network_mqtt:
     external: true
