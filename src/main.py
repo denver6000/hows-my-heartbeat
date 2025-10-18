@@ -1,5 +1,5 @@
+# pylint: disable=too-many-lines,too-many-locals,broad-except,global-statement
 import asyncio
-from dataclasses import asdict
 import json
 import os
 import threading
@@ -9,8 +9,7 @@ from zoneinfo import ZoneInfo
 import paho.mqtt.client as mqtt
 from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
-from google.cloud.firestore_v1 import FieldFilter
-from src.firestore.device_firestore import  init_firestore, process_schedule_raw_with_tracking, set_device_status, set_hub_status, set_schedule_document_as_received, set_schedule_temp_document_as_received, set_settings_firebase_doc, get_settings_request, set_settings_request_as_received, get_room_status, set_room_status, get_timeslot_status, set_timeslot_status
+from src.firestore.device_firestore import  init_firestore, set_device_status, set_hub_status, set_schedule_document_as_received, set_schedule_temp_document_as_received, set_settings_firebase_doc, get_settings_request, set_settings_request_as_received, set_room_status, set_timeslot_status
 from src.models.models import DeviceStatusInfo, RoomStatusAndTimestamp, DeviceIdAndPulseTimeStamp
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -39,6 +38,25 @@ map_of_resolved_status: Dict[str, DeviceStatusInfo] = {
 }
 hub_is_online: bool = False
 
+def normalize_class_cancellation_data(doc_data):
+    """Convert Firestore document data to the expected field structure for MQTT publishing"""
+    return {
+        "day": doc_data.get("day"),
+        "day_of_month": doc_data.get("day_of_month"),
+        "id": doc_data.get("id"),
+        "month": doc_data.get("month"),
+        "reason": doc_data.get("reason"),
+        "roomId": doc_data.get("room_id"),
+        "teacherEmail": doc_data.get("teacher_email"),
+        "teacherId": doc_data.get("teacher_id"),
+        "teacherName": doc_data.get("teacher_name"),
+        "timeSlot": doc_data.get("time_slot"),
+        "timeslotId": doc_data.get("timeslot_id"),
+        "year": doc_data.get("year"),
+        "accepted": doc_data.get("accepted"),
+        "is_temporary": doc_data.get("is_temporary")
+    }
+
 def on_connect(client, userdata, flags, rc):
     print(f"Connected with result code {rc}")
     topics = (
@@ -55,8 +73,6 @@ def on_connect(client, userdata, flags, rc):
         print(f"Subscribed to topic: {topic}, result: {result}")
 
 
-
-
 def eval_pulse(firestore_db):
     now = datetime.now(tz=DEVICE_TZ)
 
@@ -64,7 +80,7 @@ def eval_pulse(firestore_db):
     with pulse_lock:
         pulse_copy = map_of_pulse.copy()
     with room_status_lock:
-        room_status_copy = map_of_room_status.copy()
+        _ = map_of_room_status.copy()  # Not currently used but kept for future use
     with resolved_status_lock:
         dupe_dict = map_of_resolved_status.copy()
 
@@ -105,17 +121,22 @@ def update_hub_status(firestore_db, is_online: bool):
             print(f"Hub status changed to: {'ONLINE' if is_online else 'OFFLINE'}")
 
 
+
+
 if __name__ == '__main__':
     acc_path = os.getenv("ENV_FILE")
     load_dotenv(acc_path)
     mqttc = mqtt.Client(transport="websockets")
     mqttc.on_connect = on_connect
     
+    # Check if we should use Firestore emulator
+    use_emulator = os.getenv("FIRESTORE_EMULATOR_HOST") is not None
     service_acc_path = os.getenv("SERVICE_ACCOUNT_PATH")
-    if not service_acc_path:
-        raise ValueError("SERVICE_ACCOUNT_PATH environment variable is required")
+    
+    if not use_emulator and not service_acc_path:
+        raise ValueError("SERVICE_ACCOUNT_PATH environment variable is required for production mode")
 
-    firestore = init_firestore(cred_path=service_acc_path)
+    firestore = init_firestore(cred_path=service_acc_path, use_emulator=use_emulator)
     
     def on_message(client, userdata, msg):
         topic = msg.topic
@@ -127,7 +148,7 @@ if __name__ == '__main__':
         
         if NODE_HEART_PULSE_BASE in topic:
             try:
-                topic_base, room_id, device_id = topic.split("/")
+                _, room_id, device_id = topic.split("/")
                 with pulse_lock:
                     map_of_pulse[room_id + "/" + device_id] = DeviceIdAndPulseTimeStamp(
                         device_id=device_id,
@@ -137,7 +158,7 @@ if __name__ == '__main__':
                 print("Malformed topic.")
         elif ROOM_STATUS_BASE in topic:
             try:
-                topic_base, room_id = topic.split("/")
+                _, room_id = topic.split("/")
                 is_turned_on = msg.payload.decode() == "1"
                 # Update room status in Firestore (only if changed)
                 set_room_status(firestore_db=firestore, room_id=room_id, is_turned_on=is_turned_on)
@@ -182,7 +203,7 @@ if __name__ == '__main__':
                 print(f"    Topic: {topic}, Payload: {payload}")
         elif SCHEDULE_UPDATE_ACK in topic:
             try:
-                topic_base, schedule_id = topic.split("/")
+                _, schedule_id = topic.split("/")
                 print(f"Received schedule update ACK for schedule ID: {schedule_id} with payload: {json.loads(msg.payload.decode())}")
                 set_schedule_document_as_received(
                     firestore_db=firestore,
@@ -193,7 +214,7 @@ if __name__ == '__main__':
                 print("Malformed topic for schedule update ACK.")
         elif SCHEDULE_TEMP_ACK in topic:
             try:
-                topic_base, temp_schedule_id = topic.split("/")
+                _, temp_schedule_id = topic.split("/")
                 print(f"Received temporary schedule ACK for ID: {temp_schedule_id}")
                 set_schedule_temp_document_as_received(
                     firestore_db=firestore,
@@ -204,7 +225,7 @@ if __name__ == '__main__':
                 print("Malformed topic for temporary schedule ACK.")
         elif SETTINGS_UPDATE_ACK in topic:
             try: 
-                topic_base, request_id = topic.split("/")
+                _, request_id = topic.split("/")
                 print(f"Received settings update ACK for ID: {request_id}")
                 
                 # Get the settings request from Firestore
@@ -235,7 +256,7 @@ if __name__ == '__main__':
                 print("Malformed topic for settings update ACK.")
             except Exception as e:
                 print(f"Error processing settings update ACK: {e}")
-                print("Malformed topic for temporary schedule ACK.")
+                print("Malformed topic for settings update ACK.")
         
     mqttc.on_message = on_message
     url = os.getenv("MQTT_URL")
@@ -262,10 +283,149 @@ if __name__ == '__main__':
         my_scheduler = AsyncIOScheduler()
         my_scheduler.start()
 
-        my_scheduler.add_job(eval_pulse, trigger=IntervalTrigger(seconds=2), args=[firestore])
+        # my_scheduler.add_job(eval_pulse, trigger=IntervalTrigger(seconds=2), args=[firestore])
         
-        while True:
-            await asyncio.sleep(1000)
+        # Set up Firestore listener for entire temporary_schedules_v2 collection
+        temp_collection_ref = firestore.collection('temporary_schedules_v2')
+        
+        def on_temporary_schedule_update(doc_snapshot, changes, read_time):
+            for change in changes:
+                if change.type.name == 'MODIFIED':
+                    doc_data = change.document.to_dict()
+                    if doc_data and doc_data.get('is_approved') is True and doc_data.get("received_by_hub") is False:
+                        # Serialize document data to JSON and publish on MQTT
+                        try:
+                            json_payload = json.dumps(doc_data, default=str)  # default=str handles datetime objects
+                            result = mqttc.publish(
+                                f"{SCHEDULE_TEMP_UPDATE}/{doc_data.get('timeslot_id')}", 
+                                json_payload, 
+                                qos=2,
+                                retain=True)
+                            print(f"📤 Published approved temporary schedule to MQTT topic '{SCHEDULE_TEMP_UPDATE}'")
+                            print(f"    Document ID: {change.document.id}")
+                            print(f"    Publish result: {result}")
+                        except Exception as e:
+                            print(f"❌ Error publishing temporary schedule to MQTT: {e}")
+
+        # Set up Firestore listener for entire schedule_raw collection
+        schedule_collection_ref = firestore.collection('schedule_raw')
+        
+        def on_schedule_raw_update(doc_snapshot, changes, read_time):
+            for change in changes:
+                if change.type.name == 'ADDED':
+                    doc_data = change.document.to_dict()
+                    if doc_data and doc_data.get("received_by_hub") is False:
+                        # Wrap the data in ScheduleWrapper structure like Kotlin code
+                        try:
+                            import uuid
+                            import time
+                            
+                            schedule_wrapper = {
+                                "scheduleId": str(uuid.uuid4()), 
+                                "schedules": doc_data.get("schedules", []), 
+                                "uploadDate": int(time.time()),  # Current time in epoch seconds
+                                "isTemporary": doc_data.get("is_temporary", False),  
+                                "receivedByHub": False,  
+                                "receivedTimestamp": None  
+                            }
+                            
+                            json_payload = json.dumps(schedule_wrapper, default=str)
+                            result = mqttc.publish(
+                                f"{SCHEDULE_UPDATE}/{schedule_wrapper['scheduleId']}", 
+                                json_payload, 
+                                qos=2,
+                                retain=True
+                            )
+                        except Exception as e:
+                            print(f"❌ Error publishing schedule to MQTT: {e}")
+
+        class_cancellations_ref = firestore.collection('classCancellationsRequest')
+        firestore.collection("test").add({
+            "hi": True
+        })
+        def on_class_cancellation_update(doc_snapshot, changes, read_time):
+            for change in changes:
+                if change.type.name == 'ADDED':
+                    doc_data = change.document.to_dict()
+                    if doc_data:
+                        # Normalize data early for consistent property access
+                        normalized_data = normalize_class_cancellation_data(doc_data)
+                        timeslot_id = normalized_data.get('timeslotId')
+                        
+                        if normalized_data.get('is_temporary') is True:
+                            try:
+                                # Check if accepted is null and is_temporary is true
+                                if normalized_data.get('accepted') is None:
+                                    # Update the document to set accepted = true
+                                    change.document.reference.update({'accepted': True})
+                                    print(f"✅ Auto-accepted temporary class cancellation: {change.document.id}")
+                                    
+                                    # Update normalized data for MQTT publishing
+                                    normalized_data['accepted'] = True
+                                    
+                                    # Publish using normalized data
+                                    json_payload = json.dumps(normalized_data, default=str)
+                                    result = mqttc.publish(
+                                        f"cancel_schedule/{timeslot_id}", 
+                                        json_payload, 
+                                        retain=True,
+                                        qos=2)
+                                
+                                if timeslot_id:
+                                    # Publish using normalized data
+                                    json_payload = json.dumps(normalized_data, default=str)
+                                    result = mqttc.publish(
+                                        topic=f"cancel_schedule/{timeslot_id}", 
+                                        payload=json_payload, 
+                                        qos=2,
+                                        retain=True
+                                    )
+                                    print(f"📤 Published temporary class cancellation to MQTT topic 'cancel_schedule/{timeslot_id}'")
+                                    print(f"    Document ID: {change.document.id}")
+                                    print(f"    Publish result: {result}")
+                                else:
+                                    print(f"❌ No timeslot_id found in temporary class cancellation document {change.document.id}")
+                            except Exception as e:
+                                print(f"❌ Error publishing temporary class cancellation to MQTT: {e}")
+                
+                elif change.type.name == 'MODIFIED':
+                    doc_data = change.document.to_dict()
+                    if doc_data:
+                        # Normalize data early for consistent property access
+                        normalized_data = normalize_class_cancellation_data(doc_data)
+                        
+                        if normalized_data.get('is_temporary') is False and normalized_data.get('accepted') is True:
+                            try:
+                                timeslot_id = normalized_data.get('timeslotId')
+                                if timeslot_id:
+                                    # Publish using normalized data
+                                    json_payload = json.dumps(normalized_data, default=str)
+                                    result = mqttc.publish(
+                                        f"cancel_schedule/{timeslot_id}", 
+                                        json_payload, 
+                                        qos=2,
+                                        retain=True)
+                                    print(f"📤 Published regular class cancellation to MQTT topic 'cancel_schedule/{timeslot_id}'")
+                                    print(f"    Document ID: {change.document.id}")
+                                    print(f"    Publish result: {result}")
+                                else:
+                                    print(f"❌ No timeslot_id found in regular class cancellation document {change.document.id}")
+                            except Exception as e:
+                                print(f"❌ Error publishing regular class cancellation to MQTT: {e}")
+        
+        temp_collection_watch = temp_collection_ref.on_snapshot(on_temporary_schedule_update)
+        schedule_collection_watch = schedule_collection_ref.on_snapshot(on_schedule_raw_update)
+        class_cancellation_watch = class_cancellations_ref.on_snapshot(on_class_cancellation_update)
+        
+        try:
+            while True:
+                await asyncio.sleep(1000)
+        finally:
+            # Clean up the listeners when the application shuts down
+            temp_collection_watch.unsubscribe()
+            schedule_collection_watch.unsubscribe()
+            class_cancellation_watch.unsubscribe()
+            print("🔌 Firestore collection listeners unsubscribed")
 
 
     try:
