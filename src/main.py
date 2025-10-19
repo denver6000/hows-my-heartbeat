@@ -9,14 +9,14 @@ from zoneinfo import ZoneInfo
 import paho.mqtt.client as mqtt
 from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
-from src.firestore.device_firestore import  init_firestore, set_device_status, set_hub_status, set_schedule_document_as_received, set_schedule_temp_document_as_received, set_settings_firebase_doc, get_settings_request, set_settings_request_as_received, set_room_status, set_timeslot_status
+from src.firestore.device_firestore import  init_firestore, set_device_status, set_hub_status, set_schedule_document_as_received, set_schedule_temp_document_as_received, set_settings_firebase_doc, get_settings_request, set_settings_request_as_received, set_room_status, set_timeslot_status, set_cancellation_as_received
 from src.models.models import DeviceStatusInfo, RoomStatusAndTimestamp, DeviceIdAndPulseTimeStamp
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 DEVICE_TZ = ZoneInfo("Asia/Manila")
 NODE_HEART_PULSE_BASE = "heart_pulse"
 ROOM_STATUS_BASE = "room_status"
-HUB_CONNECTION_STATE = "broker/connection/+/state"
+HUB_CONNECTION_STATE = "broker/connection/#"
 TIMESLOTS_BASE = "timeslots"
 SCHEDULE_UPDATE_ACK = "schedule_update_ack"
 SCHEDULE_TEMP_UPDATE = "schedule_temp_update"
@@ -24,6 +24,7 @@ SCHEDULE_TEMP_ACK = "schedule_temp_update_ack"
 SCHEDULE_UPDATE = "schedule_update"
 SCHEDULE_PROCESS = "schedule_update_process"
 SETTINGS_UPDATE_ACK = "settings_update_ack"
+CANCELLATION_ADDED = "cancellation_addded"
 
 # Thread locks for thread-safe access
 pulse_lock = threading.Lock()
@@ -62,11 +63,12 @@ def on_connect(client, userdata, flags, rc):
     topics = (
         f"{NODE_HEART_PULSE_BASE}/#",
         f"{ROOM_STATUS_BASE}/#",
-        f"{HUB_CONNECTION_STATE}",
         f"{TIMESLOTS_BASE}/#",
         f"{SCHEDULE_UPDATE_ACK}/#",
         f"{SCHEDULE_TEMP_ACK}/#",
-        f"{SETTINGS_UPDATE_ACK}/#"
+        f"{SETTINGS_UPDATE_ACK}/#",
+        f"{CANCELLATION_ADDED}/#",
+        "$SYS/broker/connection/remote_id/#"
     )
     for topic in topics:
         result = client.subscribe(topic)
@@ -167,13 +169,10 @@ if __name__ == '__main__':
         elif "broker/connection/" in topic and topic.endswith("/state"):
             try:
                 # Extract remote_id from broker/connection/remote_id/state
-                parts = topic.split("/")
-                if len(parts) == 4 and parts[0] == "broker" and parts[1] == "connection" and parts[3] == "state":
-                    remote_id = parts[2]
-                    connection_state = msg.payload.decode()
-                    is_online = connection_state == "1" or connection_state.lower() == "online"
-                    update_hub_status(firestore_db=firestore, is_online=is_online)
-                    print(f"Hub {remote_id} connection state: {connection_state}")
+                connection_state = msg.payload.decode()
+                is_online = connection_state == "1" or connection_state.lower() == "online"
+                update_hub_status(firestore_db=firestore, is_online=is_online)
+                print(f"Hub connection state: {connection_state}") 
             except Exception as e:
                 print(f"Error processing hub connection state: {e}")
         elif TIMESLOTS_BASE in topic:
@@ -257,6 +256,20 @@ if __name__ == '__main__':
             except Exception as e:
                 print(f"Error processing settings update ACK: {e}")
                 print("Malformed topic for settings update ACK.")
+        elif CANCELLATION_ADDED in topic:
+            try:
+                _, cancellation_id = topic.split("/")
+                print(f"Received cancellation added for ID: {cancellation_id}")
+                set_cancellation_as_received(
+                    firestore_db=firestore,
+                    cancellation_id=cancellation_id,
+                    is_received=True
+                )
+                print(f"✅ Marked cancellation {cancellation_id} as received by hub")
+            except ValueError:
+                print("Malformed topic for cancellation added.")
+            except Exception as e:
+                print(f"❌ Error processing cancellation added: {e}")
         
     mqttc.on_message = on_message
     url = os.getenv("MQTT_URL")
@@ -340,12 +353,11 @@ if __name__ == '__main__':
                             print(f"❌ Error publishing schedule to MQTT: {e}")
 
         class_cancellations_ref = firestore.collection('classCancellationsRequest')
-        firestore.collection("test").add({
-            "hi": True
-        })
+    
         def on_class_cancellation_update(doc_snapshot, changes, read_time):
             for change in changes:
                 if change.type.name == 'ADDED':
+                    
                     doc_data = change.document.to_dict()
                     if doc_data:
                         # Normalize data early for consistent property access

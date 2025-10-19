@@ -1,15 +1,15 @@
 from datetime import datetime
 import os
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials as admin_creds, firestore
 from firebase_admin.firestore import client as firestore_client
 from src.models.models import DeviceStatusInfo, SettingsRequest
 from google.cloud.firestore_v1 import DocumentSnapshot
 from google.cloud.firestore_v1.types import DocumentChange
 from google.cloud.firestore_v1 import Client as firestore_client
-from google.auth.credentials import AnonymousCredentials
 # Singleton Firestore instance
-
+from google.cloud import firestore
+from google.auth import credentials
 
 cred_path = os.getenv("SERVICE_ACCOUNT_PATH")
 # cred = credentials.Certificate(cred_path)
@@ -22,36 +22,29 @@ COLLECTION_NAME = "deviceStatus"
 
 def init_firestore(cred_path: str | None = None, use_emulator: bool = False) -> firestore_client:
     if use_emulator:
-        # Point to Firestore emulator using container name
-        os.environ["FIRESTORE_EMULATOR_HOST"] = "hardcore_moore:8080"
-        os.environ["FIRESTORE_PROJECT_ID"] = "demo-project"
-        project_id = os.environ["FIRESTORE_PROJECT_ID"]
+        project_id = os.environ["GCLOUD_PROJECT"]
 
         # Create a no-op credential that doesn't need a PEM or ADC
-        class NoCred(credentials.Base):
-            def get_credential(self):
-                return AnonymousCredentials()
+        # class NoCred(credentials.Base):
+        #     def get_credential(self):
+        #         return AnonymousCredentials()
 
-        cred = NoCred()
-
-        try:
-            firebase_admin.initialize_app(cred, {"projectId": project_id})
-        except ValueError:
-            pass  # already initialized
+        # cred = NoCred()
+        firebase_admin.initialize_app(credential=credentials.AnonymousCredentials(), options= {"projectId": project_id})
         print("Emulator mode")
     else:
         # Production: use real service account
         print("Prod Modes")
         if not cred_path:
             raise ValueError("cred_path is required for production mode")
-        cred = credentials.Certificate(cred_path)
+        cred = admin_creds.Certificate(cred_path)
         try:
             firebase_admin.initialize_app(cred)
         except ValueError:
             pass  # already initialized
 
     # Firestore client works for both emulator and production
-    return firestore.client()
+    return firestore.Client()
 
 
 def set_device_status(firestore_db: firestore_client, device_status_info: DeviceStatusInfo):
@@ -327,3 +320,13 @@ def set_timeslot_status(firestore_db: firestore_client, timeslot_id: str, status
     }
     doc_ref.set(timeslot_data, merge=True)
     print(f"[FIRESTORE] Updated timeslot {timeslot_id} status to {status}")
+
+
+def set_cancellation_as_received(firestore_db: firestore_client, cancellation_id: str, is_received: bool):
+    """Mark a class cancellation as received by the hub"""
+    doc_ref = firestore_db.collection('classCancellationsRequest').document(cancellation_id)
+    doc_ref.update({
+        'received_by_hub': is_received,
+        'received_timestamp': datetime.now()
+    })
+    print(f"[FIRESTORE] Set cancellation {cancellation_id} received status to {is_received}")
