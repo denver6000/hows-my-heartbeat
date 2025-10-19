@@ -265,6 +265,11 @@ if __name__ == '__main__':
                 print("Malformed topic for settings update ACK.")
         elif CANCEL_SCHEDULE_ACK in topic:
             try:
+                # Check if payload is null/empty - do nothing if it is
+                if not payload or payload.lower() == 'null':
+                    print(f"Received null payload for cancellation ACK topic: {topic} - ignoring")
+                    return
+                
                 _, cancellation_id = topic.split("/")
                 print(f"Received cancellation ACK for ID: {cancellation_id}")
                 set_cancellation_as_received(
@@ -273,7 +278,7 @@ if __name__ == '__main__':
                     is_received=True
                 )
                 # Clear the retained message for the corresponding cancel_schedule topic
-                mqttc.publish(f"cancel_schedule/{cancellation_id}", payload=None, qos=2, retain=True)
+           
                 print(f"🧹 Cleared retained message for topic: cancel_schedule/{cancellation_id}")
                 print(f"✅ Marked cancellation {cancellation_id} as received by hub")
             except ValueError:
