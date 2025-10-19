@@ -229,8 +229,8 @@ def extract_resolved_slots_by_day_v2(schedules: List[ScheduleV2]) -> List[Resolv
 
 def set_schedule_document_as_received(firestore_db: firestore_client, is_received: bool, schedule_id: str):
     """Mark a schedule document as received by the hub"""
-    # doc_ref = firestore_db.collection('schedule_raw').document(schedule_id)
-    # doc_ref.update({'received_by_hub': is_received})
+    doc_ref = firestore_db.collection('schedule_raw').document(schedule_id)
+    doc_ref.update({'received_by_hub': is_received})
     print(f"[FIRESTORE] Set schedule {schedule_id} received status to {is_received}")
 
 

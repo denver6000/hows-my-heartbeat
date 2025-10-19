@@ -335,16 +335,15 @@ if __name__ == '__main__':
         
         def on_schedule_raw_update(doc_snapshot, changes, read_time):
             for change in changes:
-                if change.type.name == 'ADDED':
+                if change.type.name == 'MODIFIED':
                     doc_data = change.document.to_dict()
-                    if doc_data and doc_data.get("received_by_hub") is False:
+                    if doc_data and doc_data.get("in_use") is True and doc_data.get("received_by_hub") is False:
                         # Wrap the data in ScheduleWrapper structure like Kotlin code
                         try:
-                            import uuid
                             import time
                             
                             schedule_wrapper = {
-                                "scheduleId": str(uuid.uuid4()), 
+                                "scheduleId": doc_data.get("schedule_id"), 
                                 "schedules": doc_data.get("schedules", []), 
                                 "uploadDate": int(time.time()),  # Current time in epoch seconds
                                 "isTemporary": doc_data.get("is_temporary", False),  
