@@ -24,7 +24,7 @@ SCHEDULE_TEMP_ACK = "schedule_temp_update_ack"
 SCHEDULE_UPDATE = "schedule_update"
 SCHEDULE_PROCESS = "schedule_update_process"
 SETTINGS_UPDATE_ACK = "settings_update_ack"
-CANCELLATION_ADDED = "cancellation_addded"
+CANCEL_SCHEDULE_ACK = "cancel_schedule_ack"
 
 # Thread locks for thread-safe access
 pulse_lock = threading.Lock()
@@ -45,6 +45,7 @@ def normalize_class_cancellation_data(doc_data):
         "day": doc_data.get("day"),
         "day_of_month": doc_data.get("day_of_month"),
         "id": doc_data.get("id"),
+        "cancellationId": doc_data.get("cancellation_id"),
         "month": doc_data.get("month"),
         "reason": doc_data.get("reason"),
         "roomId": doc_data.get("room_id"),
@@ -67,7 +68,7 @@ def on_connect(client, userdata, flags, rc):
         f"{SCHEDULE_UPDATE_ACK}/#",
         f"{SCHEDULE_TEMP_ACK}/#",
         f"{SETTINGS_UPDATE_ACK}/#",
-        f"{CANCELLATION_ADDED}/#",
+        f"{CANCEL_SCHEDULE_ACK}/#",
         "$SYS/broker/connection/remote_id/#"
     )
     for topic in topics:
@@ -209,6 +210,9 @@ if __name__ == '__main__':
                     is_received=True,
                     schedule_id=schedule_id
                 )
+                # Clear the retained message for the corresponding schedule_update topic
+                mqttc.publish(f"{SCHEDULE_UPDATE}/{schedule_id}", payload=None, qos=2, retain=True)
+                print(f"🧹 Cleared retained message for topic: {SCHEDULE_UPDATE}/{schedule_id}")
             except ValueError:
                 print("Malformed topic for schedule update ACK.")
         elif SCHEDULE_TEMP_ACK in topic:
@@ -220,6 +224,9 @@ if __name__ == '__main__':
                     is_received=True,
                     temporary_schedule_id=temp_schedule_id
                 )
+                # Clear the retained message for the corresponding schedule_temp_update topic
+                mqttc.publish(f"{SCHEDULE_TEMP_UPDATE}/{temp_schedule_id}", payload=None, qos=2, retain=True)
+                print(f"🧹 Cleared retained message for topic: {SCHEDULE_TEMP_UPDATE}/{temp_schedule_id}")
             except ValueError:
                 print("Malformed topic for temporary schedule ACK.")
         elif SETTINGS_UPDATE_ACK in topic:
@@ -256,20 +263,23 @@ if __name__ == '__main__':
             except Exception as e:
                 print(f"Error processing settings update ACK: {e}")
                 print("Malformed topic for settings update ACK.")
-        elif CANCELLATION_ADDED in topic:
+        elif CANCEL_SCHEDULE_ACK in topic:
             try:
                 _, cancellation_id = topic.split("/")
-                print(f"Received cancellation added for ID: {cancellation_id}")
+                print(f"Received cancellation ACK for ID: {cancellation_id}")
                 set_cancellation_as_received(
                     firestore_db=firestore,
                     cancellation_id=cancellation_id,
                     is_received=True
                 )
+                # Clear the retained message for the corresponding cancel_schedule topic
+                mqttc.publish(f"cancel_schedule/{cancellation_id}", payload=None, qos=2, retain=True)
+                print(f"🧹 Cleared retained message for topic: cancel_schedule/{cancellation_id}")
                 print(f"✅ Marked cancellation {cancellation_id} as received by hub")
             except ValueError:
-                print("Malformed topic for cancellation added.")
+                print("Malformed topic for cancellation ACK.")
             except Exception as e:
-                print(f"❌ Error processing cancellation added: {e}")
+                print(f"❌ Error processing cancellation ACK: {e}")
         
     mqttc.on_message = on_message
     url = os.getenv("MQTT_URL")
@@ -363,6 +373,7 @@ if __name__ == '__main__':
                         # Normalize data early for consistent property access
                         normalized_data = normalize_class_cancellation_data(doc_data)
                         timeslot_id = normalized_data.get('timeslotId')
+                        cancellation_id = normalized_data.get('cancellationId')
                         
                         if normalized_data.get('is_temporary') is True:
                             try:
@@ -376,18 +387,17 @@ if __name__ == '__main__':
                                     normalized_data['accepted'] = True
                                     
                                     # Publish using normalized data
-                                    json_payload = json.dumps(normalized_data, default=str)
+                                    json_payload = json.dumps(doc_data, default=str)
                                     result = mqttc.publish(
-                                        f"cancel_schedule/{timeslot_id}", 
+                                        f"cancel_schedule/{cancellation_id}", 
                                         json_payload, 
                                         retain=True,
                                         qos=2)
-                                
                                 if timeslot_id:
                                     # Publish using normalized data
-                                    json_payload = json.dumps(normalized_data, default=str)
+                                    json_payload = json.dumps(doc_data, default=str)
                                     result = mqttc.publish(
-                                        topic=f"cancel_schedule/{timeslot_id}", 
+                                        topic=f"cancel_schedule/{cancellation_id}", 
                                         payload=json_payload, 
                                         qos=2,
                                         retain=True
@@ -411,9 +421,9 @@ if __name__ == '__main__':
                                 timeslot_id = normalized_data.get('timeslotId')
                                 if timeslot_id:
                                     # Publish using normalized data
-                                    json_payload = json.dumps(normalized_data, default=str)
+                                    json_payload = json.dumps(doc_data, default=str)
                                     result = mqttc.publish(
-                                        f"cancel_schedule/{timeslot_id}", 
+                                        f"cancel_schedule/{normalized_data.get('cancellationId')}", 
                                         json_payload, 
                                         qos=2,
                                         retain=True)
