@@ -204,14 +204,20 @@ if __name__ == '__main__':
         elif SCHEDULE_UPDATE_ACK in topic:
             try:
                 _, schedule_id = topic.split("/")
-                print(f"Received schedule update ACK for schedule ID: {schedule_id} with payload: {json.loads(msg.payload.decode())}")
+                print(
+                    f"Received schedule update ACK for schedule ID: {schedule_id} with payload: {json.loads(msg.payload.decode())}")
                 set_schedule_document_as_received(
                     firestore_db=firestore,
                     is_received=True,
                     schedule_id=schedule_id
                 )
                 # Clear the retained message for the corresponding schedule_update topic
-                mqttc.publish(f"{SCHEDULE_UPDATE}/{schedule_id}", payload=None, qos=2, retain=True)
+                mqttc.publish(
+                    f"{SCHEDULE_UPDATE}/{schedule_id}", 
+                    payload=None, 
+                    qos=2, 
+                    retain=True
+                )
                 print(f"🧹 Cleared retained message for topic: {SCHEDULE_UPDATE}/{schedule_id}")
             except ValueError:
                 print("Malformed topic for schedule update ACK.")
@@ -225,7 +231,18 @@ if __name__ == '__main__':
                     temporary_schedule_id=temp_schedule_id
                 )
                 # Clear the retained message for the corresponding schedule_temp_update topic
-                mqttc.publish(f"{SCHEDULE_TEMP_UPDATE}/{temp_schedule_id}", payload=None, qos=2, retain=True)
+                mqttc.publish(
+                    topic=f"{SCHEDULE_TEMP_UPDATE}/{temp_schedule_id}", 
+                    payload=None, 
+                    qos=2, 
+                    retain=True
+                )
+                mqttc.publish(
+                    topic=f"{SCHEDULE_UPDATE}/{temp_schedule_id}",
+                    payload=None,
+                    qos=2,
+                    retain=True
+                )
                 print(f"🧹 Cleared retained message for topic: {SCHEDULE_TEMP_UPDATE}/{temp_schedule_id}")
             except ValueError:
                 print("Malformed topic for temporary schedule ACK.")
@@ -277,8 +294,15 @@ if __name__ == '__main__':
                     cancellation_id=cancellation_id,
                     is_received=True
                 )
+                
                 # Clear the retained message for the corresponding cancel_schedule topic
-           
+                mqttc.publish(
+                    topic=f"cancel_schedule/{cancellation_id}",
+                    qos=2,
+                    payload = None,
+                    retain=True,
+                )
+                
                 print(f"🧹 Cleared retained message for topic: cancel_schedule/{cancellation_id}")
                 print(f"✅ Marked cancellation {cancellation_id} as received by hub")
             except ValueError:
