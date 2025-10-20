@@ -364,7 +364,7 @@ if __name__ == '__main__':
         
         def on_schedule_raw_update(doc_snapshot, changes, read_time):
             for change in changes:
-                if change.type.name == 'MODIFIED':
+                if change.type.name == 'ADDED':
                     doc_data = change.document.to_dict()
                     if doc_data and doc_data.get("in_use") is True and doc_data.get("received_by_hub") is False:
                         # Wrap the data in ScheduleWrapper structure like Kotlin code
