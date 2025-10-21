@@ -25,6 +25,7 @@ SCHEDULE_UPDATE = "schedule_update"
 SCHEDULE_PROCESS = "schedule_update_process"
 SETTINGS_UPDATE_ACK = "settings_update_ack"
 CANCEL_SCHEDULE_ACK = "cancel_schedule_ack"
+SET_ROOM_STATUS = "set_room_status"
 
 # Thread locks for thread-safe access
 pulse_lock = threading.Lock()
