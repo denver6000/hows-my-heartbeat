@@ -43,8 +43,8 @@ def init_firestore(cred_path: str | None = None, use_emulator: bool = False) -> 
         except ValueError:
             pass  # already initialized
 
-    # Firestore client works for both emulator and production
-    return firestore.Client()
+    # Return the Firebase Admin Firestore client (works for both emulator and production)
+    return firestore_client()
 
 
 def set_device_status(firestore_db: firestore_client, device_status_info: DeviceStatusInfo):

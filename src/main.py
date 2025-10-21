@@ -64,7 +64,7 @@ def on_connect(client, userdata, flags, rc):
     print(f"Connected with result code {rc}")
     topics = (
         f"{NODE_HEART_PULSE_BASE}/#",
-        f"{ROOM_STATUS_BASE}/#",
+        f"{SET_ROOM_STATUS}/#",
         f"{TIMESLOTS_BASE}/#",
         f"{SCHEDULE_UPDATE_ACK}/#",
         f"{SCHEDULE_TEMP_ACK}/#",
@@ -160,14 +160,17 @@ if __name__ == '__main__':
                         timestamp=now)
             except ValueError:
                 print("Malformed topic.")
-        elif ROOM_STATUS_BASE in topic:
+        elif SET_ROOM_STATUS in topic:
             try:
                 _, room_id = topic.split("/")
-                is_turned_on = msg.payload.decode() == "1"
+                is_turned_on = payload == "1"
                 # Update room status in Firestore (only if changed)
                 set_room_status(firestore_db=firestore, room_id=room_id, is_turned_on=is_turned_on)
+                print(f"[ROOM STATUS] Set room {room_id} status to {'ON' if is_turned_on else 'OFF'} via ESP32")
             except ValueError:
-                print("Malformed room status topic.")
+                print("Malformed set_room_status topic.")
+            except Exception as e:
+                print(f"❌ Error processing set_room_status topic: {e}")
         elif "broker/connection/" in topic and topic.endswith("/state"):
             try:
                 # Extract remote_id from broker/connection/remote_id/state
