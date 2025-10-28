@@ -13,8 +13,8 @@ services:
       - ./mosquitto/log:/mosquitto/log
   heartbeat:
     build:
-      context: .
-      dockerfile: ./src/Dockerfile
+      context: ./src
+      dockerfile: Dockerfile
     container_name: heartbeat_container
     networks:
       - default
@@ -23,9 +23,8 @@ services:
     environment:
       ENV_FILE: /app/config/.env
     volumes:
-      - ./src:/app/src
       - ./config:/app/config
-    command: ["sleep", "infinity"]
+    entrypoint: ["sleep", "infinity"]
 networks:
   shared_test_network_mqtt:
     external: true
